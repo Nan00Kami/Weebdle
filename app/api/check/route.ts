@@ -1,42 +1,95 @@
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
+// app/api/check/route.ts
 import { NextResponse } from 'next/server';
+import { supabase } from '@/lib/supabaseClient';
 
-function norm(s: unknown) {
-  return String(s ?? '')
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^\w\s]/g, '')
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, ' ');
-}
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
+type Row = {
+  id: string;
+  character_name: string;
+  quote: string | null;
+  anime_name: string | null;
+  year: number | null;
+  genre: string | null;
+  mal_ranking: number | null;
+  image_url: string | null;
+};
+
+const FIELDS =
+  'id, character_name, quote, anime_name, year, genre, mal_ranking, image_url';
 
 export async function POST(req: Request) {
-  const body = await req.json().catch(() => ({}));
-  const guess: string = body.guess ?? '';
-  const quoteId: string | undefined = body.quoteId;
-  if (!guess.trim()) return NextResponse.json({ ok: false, error: 'No guess' });
+  try {
+    const body = await req.json().catch(() => ({}));
+    const guessName: string = (body?.guess || '').trim();
+    const quoteId: string | undefined = body?.quoteId;
 
-  // 1) Fetch the answer row we showed
-  const { data: answer, error: aErr } = await supabaseAdmin
-    .from('characters')
-    .select('*')
-    .eq('id', quoteId)
-    .maybeSingle();
+    if (!guessName || !quoteId) {
+      return NextResponse.json({ error: 'Missing guess or quoteId' }, { status: 400 });
+    }
 
-  if (aErr || !answer) return NextResponse.json({ ok: false, error: aErr?.message ?? 'Answer not found' });
+    // Correct answer
+    const { data: answer, error: e1 } = await supabase
+      .from('characters')
+      .select(FIELDS)
+      .eq('id', quoteId)
+      .single<Row>();
 
-  // 2) Fetch the guessed character row (must exist; exact name match, case-insensitive)
-  const { data: guessRow, error: gErr } = await supabaseAdmin
-    .from('characters')
-    .select('*')
-    .ilike('character_name', guess) // exact string without % acts as case-insensitive equality
-    .maybeSingle();
+    if (e1 || !answer) {
+      return NextResponse.json({ error: e1?.message || 'Answer not found' }, { status: 500 });
+    }
 
-  if (gErr) return NextResponse.json({ ok: false, error: gErr.message });
-  if (!guessRow) return NextResponse.json({ ok: false, reason: 'not_found' }); // ← let client ignore
+    // Guessed row (case-insensitive; best if user selects exact name from dropdown)
+    const { data: guessRow, error: e2 } = await supabase
+      .from('characters')
+      .select(FIELDS)
+      .ilike('character_name', guessName) // pass exact name from dropdown for precise match
+      .order('character_name', { ascending: true })
+      .limit(1)
+      .maybeSingle<Row>();
 
-  // 3) Compare names
-  const ok = norm(guessRow.character_name) === norm(answer.character_name);
-  return NextResponse.json({ ok, answer, guess: guessRow });
+    if (e2) return NextResponse.json({ error: e2.message }, { status: 500 });
+    if (!guessRow) return NextResponse.json({ ok: false, invalid: true });
+
+    // Per-field matches
+    const matches = {
+      character_name: guessRow.character_name === answer.character_name,
+      anime_name: (guessRow.anime_name || '') === (answer.anime_name || ''),
+      year: guessRow.year === answer.year,
+      genre: (guessRow.genre || '') === (answer.genre || ''),
+      mal_ranking: guessRow.mal_ranking === answer.mal_ranking,
+    };
+
+    const ok =
+      matches.character_name &&
+      matches.anime_name &&
+      matches.year &&
+      matches.genre &&
+      matches.mal_ranking;
+
+    // Numeric hints
+    const hints = {
+      year:
+        guessRow.year != null && answer.year != null
+          ? guessRow.year === answer.year
+            ? 'equal'
+            : guessRow.year < answer.year
+            ? 'up'
+            : 'down'
+          : null,
+      mal_ranking:
+        guessRow.mal_ranking != null && answer.mal_ranking != null
+          ? guessRow.mal_ranking === answer.mal_ranking
+            ? 'equal'
+            : guessRow.mal_ranking > answer.mal_ranking
+            ? 'up'   // larger number = worse; “up” means move toward the correct (lower) rank
+            : 'down'
+          : null,
+    } as const;
+
+    return NextResponse.json({ ok, guess: guessRow, answer, matches, hints });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message ?? 'Unknown error' }, { status: 500 });
+  }
 }
