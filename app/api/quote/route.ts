@@ -1,33 +1,46 @@
 import { NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabaseAdmin'; // SERVER-ONLY client
+import { supabase } from '@/lib/supabaseClient';
 
 export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
-const FIELDS =
+const cols =
   'id, character_name, quote, anime_name, year, genre, mal_ranking, image_url';
 
 export async function GET() {
   try {
-    // Pull a pool of rows that actually have non-empty quotes (server-side filter).
-    const { data, error } = await supabaseAdmin
+    // 1) Count rows that have a non-empty quote
+    const countRes = await supabase
       .from('characters')
-      .select(FIELDS)
+      .select('id', { count: 'exact', head: false })
       .not('quote', 'is', null)
-      .neq('quote', '')
-      .limit(1000);
+      .neq('quote', '');
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (countRes.error) {
+      return NextResponse.json({ error: countRes.error.message }, { status: 500 });
     }
-    const rows = data ?? [];
-    if (rows.length === 0) {
+    const count = countRes.count ?? 0;
+    if (count === 0) {
       return NextResponse.json({ error: 'No quotes available.' }, { status: 404 });
     }
 
-    const pick = rows[Math.floor(Math.random() * rows.length)];
-    return NextResponse.json(pick);
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'Unknown error' }, { status: 500 });
+    const offset = Math.floor(Math.random() * count);
+
+    // 2) Fetch one row at that offset
+    const { data, error } = await supabase
+      .from('characters')
+      .select(cols)
+      .not('quote', 'is', null)
+      .neq('quote', '')
+      .order('id', { ascending: true })
+      .range(offset, offset);
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    const row = data?.[0];
+    if (!row) return NextResponse.json({ error: 'No quotes available.' }, { status: 404 });
+
+    return NextResponse.json(row);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Server error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

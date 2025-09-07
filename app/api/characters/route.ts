@@ -1,27 +1,34 @@
 import { NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabaseAdmin'; // SERVER-ONLY client
+import { supabase } from '@/lib/supabaseClient';
 
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+export const dynamic = 'force-dynamic'; // ensure not statically analyzed
 
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const q = (searchParams.get('search') || '').trim();
-
   try {
-    let query = supabaseAdmin
+    const { searchParams } = new URL(req.url);
+    const q = (searchParams.get('search') || '').trim();
+
+    let query = supabase
       .from('characters')
       .select('id, character_name, image_url')
-      .limit(50);
+      .order('character_name', { ascending: true })
+      .limit(20);
 
-    if (q) query = query.ilike('character_name', `%${q}%`);
+    if (q) {
+      query = supabase
+        .from('characters')
+        .select('id, character_name, image_url')
+        .ilike('character_name', `%${q}%`)
+        .order('character_name', { ascending: true })
+        .limit(20);
+    }
 
     const { data, error } = await query;
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
     return NextResponse.json(data ?? []);
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'Unknown error' }, { status: 500 });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Server error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

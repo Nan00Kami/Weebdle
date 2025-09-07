@@ -21,46 +21,60 @@ const FIELDS =
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({} as any));
     const guessName: string = (body?.guess || '').trim();
     const quoteId: string | undefined = body?.quoteId;
 
     if (!guessName || !quoteId) {
-      return NextResponse.json({ error: 'Missing guess or quoteId' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Missing guess or quoteId' },
+        { status: 400 }
+      );
     }
 
-    // Correct answer
-    const { data: answer, error: e1 } = await supabase
+    // Fetch the correct answer row by id
+    const { data: answer, error: aErr } = await supabase
       .from('characters')
       .select(FIELDS)
       .eq('id', quoteId)
       .single<Row>();
 
-    if (e1 || !answer) {
-      return NextResponse.json({ error: e1?.message || 'Answer not found' }, { status: 500 });
+    if (aErr || !answer) {
+      return NextResponse.json(
+        { error: aErr?.message || 'Answer not found' },
+        { status: 500 }
+      );
     }
 
-    // Guessed row (case-insensitive; best if user selects exact name from dropdown)
-    const { data: guessRow, error: e2 } = await supabase
+    // Resolve the guessed row (case-insensitive; dropdown should pass the exact name)
+    const { data: guessRow, error: gErr } = await supabase
       .from('characters')
       .select(FIELDS)
-      .ilike('character_name', guessName) // pass exact name from dropdown for precise match
+      .ilike('character_name', guessName) // ilike for case-insensitive exact text
       .order('character_name', { ascending: true })
       .limit(1)
       .maybeSingle<Row>();
 
-    if (e2) return NextResponse.json({ error: e2.message }, { status: 500 });
-    if (!guessRow) return NextResponse.json({ ok: false, invalid: true });
+    if (gErr) {
+      return NextResponse.json({ error: gErr.message }, { status: 500 });
+    }
+    if (!guessRow) {
+      // no such character in DB
+      return NextResponse.json({ ok: false, invalid: true });
+    }
 
-    // Per-field matches
+    // Per-field matches (used to paint your table cells green)
     const matches = {
-      character_name: guessRow.character_name === answer.character_name,
+      character_name:
+        (guessRow.character_name || '').trim().toLowerCase() ===
+        (answer.character_name || '').trim().toLowerCase(),
       anime_name: (guessRow.anime_name || '') === (answer.anime_name || ''),
       year: guessRow.year === answer.year,
       genre: (guessRow.genre || '') === (answer.genre || ''),
       mal_ranking: guessRow.mal_ranking === answer.mal_ranking,
     };
 
+    // Overall correctness (all fields match)
     const ok =
       matches.character_name &&
       matches.anime_name &&
@@ -68,7 +82,9 @@ export async function POST(req: Request) {
       matches.genre &&
       matches.mal_ranking;
 
-    // Numeric hints
+    // Numeric hints for arrows in your GuessesTable
+    // year: normal numeric comparison (older/newer)
+    // mal_ranking: LOWER is better rank; so if guess rank number is bigger, arrow should be DOWN
     const hints = {
       year:
         guessRow.year != null && answer.year != null
@@ -82,14 +98,23 @@ export async function POST(req: Request) {
         guessRow.mal_ranking != null && answer.mal_ranking != null
           ? guessRow.mal_ranking === answer.mal_ranking
             ? 'equal'
-            : guessRow.mal_ranking > answer.mal_ranking
-            ? 'up'   // larger number = worse; “up” means move toward the correct (lower) rank
-            : 'down'
+            : // higher number = worse rank; user should go "down" toward the smaller (better) number
+              guessRow.mal_ranking > answer.mal_ranking
+            ? 'down'
+            : 'up'
           : null,
     } as const;
 
-    return NextResponse.json({ ok, guess: guessRow, answer, matches, hints });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message ?? 'Unknown error' }, { status: 500 });
+    return NextResponse.json({
+      ok,
+      guess: guessRow,   // your UI reads this as the resolved guess row
+      answer,            // keep sending the answer (you were using it)
+      matches,           // cell highlighting
+      hints,             // arrow directions
+    });
+  } catch (e) {
+    const message =
+      e instanceof Error ? e.message : typeof e === 'string' ? e : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
